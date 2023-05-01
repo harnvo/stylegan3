@@ -133,12 +133,12 @@ def parse_comma_separated_list(s):
 
 # Optional features.
 @click.option('--cond',         help='Train conditional model', metavar='BOOL',                 type=bool, default=False, show_default=True)
-@click.option('--mirror',       help='Enable dataset x-flips', metavar='BOOL',                  type=bool, default=False, show_default=True)
+@click.option('--mirror',       help='Enable dataset x-flips', metavar='BOOL',                  type=bool, default=True, show_default=True)
 @click.option('--aug',          help='Augmentation mode',                                       type=click.Choice(['noaug', 'ada', 'fixed']), default='ada', show_default=True)
 @click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
 @click.option('--freezed',      help='Freeze first layers of D', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--comm',         help='enable communication', metavar='BOOL',                    type=bool, default=False, show_default=True)
-@click.option('--comm_type',    help='Type of communication', metavar='STR',                    type=click.Choice(['mean', 'sharpen', 'maxpool']), default='comm',  show_default=True)
+@click.option('--comm_type',    help='Type of communication', metavar='STR',                    type=click.Choice(['mean', 'sharpen', 'maxpool']), default='mean',  show_default=True)
 
 # Misc hyperparameters.
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
@@ -149,6 +149,7 @@ def parse_comma_separated_list(s):
 @click.option('--glr',          help='G learning rate  [default: varies]', metavar='FLOAT',     type=click.FloatRange(min=0))
 @click.option('--dlr',          help='D learning rate', metavar='FLOAT',                        type=click.FloatRange(min=0), default=0.002, show_default=True)
 @click.option('--map-depth',    help='Mapping network depth  [default: varies]', metavar='INT', type=click.IntRange(min=1))
+@click.option('--mbstd',         help='minibatch std', metavar='BOOL',                          type=bool, default=True, show_default=True)
 @click.option('--mbstd-group',  help='Minibatch std group size', metavar='INT',                 type=click.IntRange(min=1), default=4, show_default=True)
 
 # Misc settings.
@@ -188,10 +189,6 @@ def main(**kwargs):
 
     # Initialize config.
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
-
-    # for communication
-    opts['comm_mult'] = 1/16 if opts['comm'] else 0
-    del opts['comm']
     
     c = dnnlib.EasyDict() # Main config dict.
     c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
@@ -216,9 +213,10 @@ def main(**kwargs):
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
     c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
-    c.D_kwargs.comm_mult = opts.comm_mult               #TODO: communication
-    c.D_kwargs.comm_type = opts.comm_type               #TODO: communication
+    c.D_kwargs.comm_mult = 1/16 if opts.comm else 0                 #TODO: communication
+    c.D_kwargs.comm_type = opts.comm_type                          
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
+    c.D_kwargs.epilogue_kwargs.mbstd_num_channels = 1 if opts.mbstd else 0
     c.loss_kwargs.r1_gamma = opts.gamma
     c.G_opt_kwargs.lr = (0.002 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
     c.D_opt_kwargs.lr = opts.dlr

@@ -93,42 +93,68 @@ def modulated_conv2d(
 @persistence.persistent_class
 class CommLayer(torch.nn.Module):
     # here we only implements mean communication. Reason is explained in paper.
-    def __init__(self, n_comm_channels, win_size=3, comm_type='mean') -> None:
+    def __init__(self, n_comm_channels, win_size=3, comm_type='mean', channels_last=False) -> None:
         assert win_size % 2 == 1 and win_size>=1 , "winsize must be odd"
         super().__init__()
+        self.pad_size   = win_size//2
         self.n_channels = n_comm_channels
         
-        if comm_type == 'mean':
-            self.conv = torch.nn.Conv3d(1, 1, (win_size, 1, 1), bias=False)
-            self.conv.requires_grad_(False)
-            self.conv.weight.data = torch.ones_like(self.conv.weight.data)/win_size
-        elif comm_type == 'sharpen':
-            self.conv = torch.nn.Conv3d(1, 1, (win_size, 1, 1), bias=False)
-            self.conv.requires_grad_(False)
-            self.conv.weight.data =-torch.ones_like(self.conv.weight.data)/win_size
-            self.conv.weight.data[:,:,win_size//2] += 1
-        elif comm_type == 'maxpool':
-            self.conv = torch.nn.MaxPool3d((win_size,1,1), stride=1)
-        elif comm_type == 'learned':
-            self.conv = torch.nn.Conv3d(1, 1, (win_size, 1, 1))
+        
+        if comm_type == 'maxpool':
+            self.conv = torch.nn.MaxPool2d((win_size,1), stride=1)
+        elif comm_type in ['mean', 'maxpool']:
+            self.conv = CommConv2dLayer(comm_type, kernel_size=win_size, channels_last=channels_last)
         else:
             raise NotImplementedError
         
-        # register this module as a buffer
-        if comm_type != 'maxpool':
-            self.register_buffer('weight', self.conv.weight.data)
-        
     def forward(self, x):
-        x_comm = x[:,:self.n_channels]
+        if x.dtype == torch.float16:
+            conv = self.conv.half()
+        else:
+            conv = self.conv
+            
+        # x_comm = x[:,:self.n_channels]
+        x_comm, x_rest = x.split([self.n_channels, x.shape[1]-self.n_channels], dim=1)
         b,c,h,w = x_comm.shape
-        x_comm = x_comm.view(b,c*h,w)
+        # b,c,h,w -> c,b,h*w
+        x_comm = x_comm.reshape(b,c,h*w).permute(1,0,2)
         # circular padding
-        x_comm = torch.cat([x_comm[-self.pad_size:,:], x_comm, x_comm[:self.pad_size,:]], dim=0)
-        x_comm = self.conv(x_comm.unsqueeze(0)).view(b,c,h,w)
+        x_comm = torch.cat([x_comm[:,-self.pad_size:,:], x_comm, x_comm[:,:self.pad_size,:]], dim=1)
+        x_comm = conv(x_comm.unsqueeze(1)).permute(2,1,0,3).view(b,c,h,w)
         
-        x[:,:self.n_channels] = x_comm
+        return torch.cat([x_comm, x_rest], dim=1)
+
+@persistence.persistent_class
+class CommConv2dLayer(torch.nn.Module):
+    def __init__(self,
+        # in_channels,                    # Number of input channels.
+        # out_channels,                   # Number of output channels.
+        comm_type,                      # Type of communication layer.
+        kernel_size,                    # Width and height of the convolution kernel.
+        channels_last   = False,        # Expect the input to have memory_format=channels_last?
+    ):
+        super().__init__()
+        assert comm_type in ['mean', 'sharpen']
+        assert kernel_size % 2 == 1 and kernel_size>=1 , "winsize must be odd"
+        self.in_channels = 1
+        self.out_channels = 1
+
+        memory_format = torch.channels_last if channels_last else torch.contiguous_format
+        if comm_type == 'mean':
+            weight = (torch.ones((1,1,kernel_size,1))/kernel_size).to(memory_format=memory_format)
+        elif comm_type == 'sharpen':
+            weight =-torch.ones_like(self.conv.weight.data)/kernel_size
+            weight[:,:,kernel_size//2] += 1
+        self.register_buffer('weight', weight)
+
+    def forward(self, x):
+        x = conv2d_resample.conv2d_resample(x=x, w=self.weight.to(x.dtype))
         return x
 
+    def extra_repr(self):
+        return ' '.join([
+            f'in_channels={self.in_channels:d}, out_channels={self.out_channels:d}, activation={self.activation:s},',
+            f'up={self.up}, down={self.down}'])
 #----------------------------------------------------------------------------
 
 @persistence.persistent_class
@@ -549,7 +575,7 @@ class SynthesisNetwork(torch.nn.Module):
                 block = getattr(self, f'b{res}')
                 block_ws.append(ws.narrow(1, w_idx, block.num_conv + block.num_torgb))
                 w_idx += block.num_conv
-
+                
         x = img = None
         for res, cur_ws in zip(self.block_resolutions, block_ws):
             block = getattr(self, f'b{res}')
@@ -643,7 +669,7 @@ class DiscriminatorBlock(torch.nn.Module):
         self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation=activation, down=2,
             trainable=next(trainable_iter), resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last)
         
-        self.comm = CommLayer(n_comm_channels=comm_channels, comm_type=comm_type) if comm_channels >= 1 else torch.nn.Identity()
+        self.comm = CommLayer(n_comm_channels=comm_channels, comm_type=comm_type, channels_last=self.channels_last) if comm_channels >= 1 else torch.nn.Identity()
 
         if architecture == 'resnet':
             self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2,
