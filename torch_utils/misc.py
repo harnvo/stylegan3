@@ -192,7 +192,7 @@ def check_ddp_consistency(module, ignore_regex=None):
 
 #----------------------------------------------------------------------------
 # Print summary table of module hierarchy.
-
+@torch.no_grad()
 def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
     assert isinstance(module, torch.nn.Module)
     assert not isinstance(module, torch.jit.ScriptModule)
