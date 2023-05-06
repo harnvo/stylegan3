@@ -93,34 +93,38 @@ def modulated_conv2d(
 @persistence.persistent_class
 class CommLayer(torch.nn.Module):
     # here we only implements mean communication. Reason is explained in paper.
-    def __init__(self, n_comm_channels, win_size=3, comm_type='mean', channels_last=False) -> None:
+    def __init__(self, n_comm_channels, win_size=3, comm_type='mean', channels_last=False, normalized=True) -> None:
         assert win_size % 2 == 1 and win_size>=1 , "winsize must be odd"
         super().__init__()
         self.pad_size   = win_size//2
         self.n_channels = n_comm_channels
         
-        
         if comm_type == 'maxpool':
+            if win_size != 3:
+                import warnings
+                warnings.warn("maxpool communication with win_size != 3 requires re-computation of gain and bias.")
             self.conv = torch.nn.MaxPool2d((win_size,1), stride=1)
-        elif comm_type in ['mean', 'maxpool']:
-            self.conv = CommConv2dLayer(comm_type, kernel_size=win_size, channels_last=channels_last)
+            # magic number
+            self.register_buffer('gain', 1/0.7479)
+            self.register_buffer('bias', torch.full([n_comm_channels],fill_value=-0.8466))
+        elif comm_type in ['mean', 'sharpen']:
+            self.conv = CommConv2dLayer(comm_type, kernel_size=win_size, normalized=normalized,channels_last=channels_last)
+            self.gain = self.bias = None
         else:
             raise NotImplementedError
         
     def forward(self, x):
-        if x.dtype == torch.float16:
-            conv = self.conv.half()
-        else:
-            conv = self.conv
-            
-        # x_comm = x[:,:self.n_channels]
         x_comm, x_rest = x.split([self.n_channels, x.shape[1]-self.n_channels], dim=1)
         b,c,h,w = x_comm.shape
         # b,c,h,w -> c,b,h*w
         x_comm = x_comm.reshape(b,c,h*w).permute(1,0,2)
         # circular padding
         x_comm = torch.cat([x_comm[:,-self.pad_size:,:], x_comm, x_comm[:,:self.pad_size,:]], dim=1)
-        x_comm = conv(x_comm.unsqueeze(1)).permute(2,1,0,3).view(b,c,h,w)
+        x_comm = self.conv(x_comm.unsqueeze(1)).permute(2,1,0,3).view(b,c,h,w) # c,b,h*w -> c,1,b,h*w -> b,1,c,h*w -> b,c,h,w
+        if self.gain is not None:
+            x_comm = x_comm * self.gain
+        if self.b is not None:
+            x_comm = bias_act.bias_act(x_comm, self.b)
         
         return torch.cat([x_comm, x_rest], dim=1)
 
@@ -131,6 +135,7 @@ class CommConv2dLayer(torch.nn.Module):
         # out_channels,                   # Number of output channels.
         comm_type,                      # Type of communication layer.
         kernel_size,                    # Width and height of the convolution kernel.
+        normalized      = True,         # Normalize the kernel?
         channels_last   = False,        # Expect the input to have memory_format=channels_last?
     ):
         super().__init__()
@@ -141,10 +146,15 @@ class CommConv2dLayer(torch.nn.Module):
 
         memory_format = torch.channels_last if channels_last else torch.contiguous_format
         if comm_type == 'mean':
-            weight = (torch.ones((1,1,kernel_size,1))/kernel_size).to(memory_format=memory_format)
+            d = kernel_size if not normalized else np.sqrt(kernel_size)
+            weight = (torch.ones((1,1,kernel_size,1))/d).to(memory_format=memory_format)
         elif comm_type == 'sharpen':
-            weight =-torch.ones_like(self.conv.weight.data)/kernel_size
+            weight =-(torch.ones((1,1,kernel_size,1))/kernel_size).to(memory_format=memory_format)
             weight[:,:,kernel_size//2] += 1
+            
+        if normalized:
+            weight = weight / torch.square(weight).sum(dim=[2,3,4], keepdim=True).sqrt()
+            
         self.register_buffer('weight', weight)
 
     def forward(self, x):
@@ -814,6 +824,7 @@ class Discriminator(torch.nn.Module):
         # comm_begin_res      = -1,       # where to start communications. a value <=0 indicates no communication.
         comm_mult           = 1/16,     # decides how many percentage of communication channels. must be greater than 1/16
         comm_type           = 'mean',   # the type of communication
+        num_packs           = 1,        # number of packs. PacGAN.
         architecture        = 'resnet', # Architecture: 'orig', 'skip', 'resnet'.
         channel_base        = 32768,    # Overall multiplier for the number of channels.
         channel_max         = 512,      # Maximum number of channels in any layer.
@@ -826,6 +837,7 @@ class Discriminator(torch.nn.Module):
     ):
         super().__init__()
         self.c_dim = c_dim
+        self.num_packs = num_packs
         self.img_resolution = img_resolution
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
@@ -838,6 +850,13 @@ class Discriminator(torch.nn.Module):
             cmap_dim = channels_dict[4]
         if c_dim == 0:
             cmap_dim = 0
+            
+        if num_packs > 1:
+            assert architecture != 'skip', 'PacGAN do not supprt skip archi, since it is meaningless to turn `b` imgs into `b//num_packs` imgs.'
+            in_channels = channels_dict[img_resolution // 2]
+            self.conn = Conv2dLayer(in_channels * num_packs, in_channels, kernel_size=1, activation='lrelu', conv_clamp=conv_clamp)
+        else:
+            self.conn = None
 
         common_kwargs = dict(img_channels=img_channels, architecture=architecture, conv_clamp=conv_clamp)
         cur_layer_idx = 0
@@ -859,7 +878,15 @@ class Discriminator(torch.nn.Module):
     def forward(self, img, c, update_emas=False, **block_kwargs):
         _ = update_emas # unused
         x = None
-        for res in self.block_resolutions:
+        block = getattr(self, f'b{self.img_resolution}')
+        x, img = block(x, img, **block_kwargs)
+        # packGAN
+        if self.num_packs > 1:
+            b,c,h,w = x.shape
+            x = x.reshape(b // self.num_packs, c*self.num_packs, h, w)
+            x = self.conn(x)
+        
+        for res in self.block_resolutions[1:]:
             block = getattr(self, f'b{res}')
             x, img = block(x, img, **block_kwargs)
 
