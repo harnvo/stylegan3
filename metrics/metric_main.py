@@ -151,3 +151,16 @@ def is50k(opts):
     return dict(is50k_mean=mean, is50k_std=std)
 
 #----------------------------------------------------------------------------
+# New metrics.
+
+@register_metric
+def intra_fid50k(opts):
+    opts.dataset_kwargs.update(max_size=None)
+    fid = frechet_inception_distance.compute_intra_fid(opts, num_gen=50000)
+    return dict(intra_fid50k=fid)
+
+@register_metric
+def intra_kid50k(opts):
+    opts.dataset_kwargs.update(max_size=None)
+    kid = kernel_inception_distance.compute_intra_kid(opts, num_gen=50000, num_subsets=100, max_subset_size=1000)
+    return dict(intra_kid50k=kid)
