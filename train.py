@@ -129,6 +129,7 @@ def parse_comma_separated_list(s):
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
 @click.option('--batch',        help='Total batch size', metavar='INT',                         type=click.IntRange(min=1), required=True)
+@click.option('--loss',         help='loss type', metavar="STR",                                type=click.Choice(['bce', 'hinge', 'wgan']), default='bce', show_default=True)
 @click.option('--gamma',        help='R1 regularization weight', metavar='FLOAT',               type=click.FloatRange(min=0), required=True)
 
 # Optional features.
@@ -217,6 +218,7 @@ def main(**kwargs):
     c.D_kwargs.comm_type = opts.comm_type                          
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
     c.D_kwargs.epilogue_kwargs.mbstd_num_channels = 1 if opts.mbstd else 0
+    c.loss_kwargs.loss_type = opts.loss
     c.loss_kwargs.r1_gamma = opts.gamma
     c.G_opt_kwargs.lr = (0.002 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
     c.D_opt_kwargs.lr = opts.dlr
@@ -233,7 +235,7 @@ def main(**kwargs):
     if c.batch_size % (c.num_gpus * c.batch_gpu) != 0:
         raise click.ClickException('--batch must be a multiple of --gpus times --batch-gpu')
     if c.batch_gpu < c.D_kwargs.epilogue_kwargs.mbstd_group_size:
-        raise click.ClickException('--batch-gpu cannot be smaller than --mbstd')
+        raise click.ClickException('--batch-gpu cannot be smaller than --mbstd-group')
     if any(not metric_main.is_valid_metric(metric) for metric in c.metrics):
         raise click.ClickException('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
 
@@ -268,9 +270,19 @@ def main(**kwargs):
     # Resume.
     if opts.resume is not None:
         c.resume_pkl = opts.resume
-        c.ada_kimg = 100 # Make ADA react faster at the beginning.
-        c.ema_rampup = None # Disable EMA rampup.
-        c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
+        if 'network-snapshot' in opts.resume:
+            resume_dir = os.path.dirname(opts.resume)
+            if os.path.exists(os.path.join(resume_dir, 'training_options.pkl')):
+                with open(os.path.join(resume_dir, 'training_options.pkl'), 'r') as f:
+                    c = dnnlib.EasyDict(json.load(f))
+            c.resume_kimg = int(opts.resume.split('-')[-1].split('.')[0])
+            print(f"resuming from {c.resume_kimg} kimg...")
+        else:
+            c.ada_kimg = 100 # Make ADA react faster at the beginning.
+            c.ema_rampup = None # Disable EMA rampup.
+            c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
+            
+
 
     # Performance-related toggles.
     if opts.fp32:
