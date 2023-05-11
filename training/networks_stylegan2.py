@@ -104,9 +104,12 @@ class CommLayer(torch.nn.Module):
                 import warnings
                 warnings.warn("maxpool communication with win_size != 3 requires re-computation of gain and bias.")
             self.conv = torch.nn.MaxPool2d((win_size,1), stride=1)
-            # magic number
-            self.register_buffer('gain', 1/0.7479)
-            self.register_buffer('bias', torch.full([n_comm_channels],fill_value=-0.8466))
+            if normalized:
+                # magic number
+                self.register_buffer('gain', 1/0.7479)
+                self.register_buffer('bias', torch.full([n_comm_channels],fill_value=-0.8466))
+            else:
+                self.gain = self.bias = None
         elif comm_type in ['mean', 'sharpen']:
             self.conv = CommConv2dLayer(comm_type, kernel_size=win_size, normalized=normalized,channels_last=channels_last)
             self.gain = self.bias = None
@@ -123,8 +126,8 @@ class CommLayer(torch.nn.Module):
         x_comm = self.conv(x_comm.unsqueeze(1)).permute(2,1,0,3).view(b,c,h,w) # c,b,h*w -> c,1,b,h*w -> b,1,c,h*w -> b,c,h,w
         if self.gain is not None:
             x_comm = x_comm * self.gain
-        if self.b is not None:
-            x_comm = bias_act.bias_act(x_comm, self.b)
+        if self.bias is not None:
+            x_comm = bias_act.bias_act(x_comm, self.bias)
         
         return torch.cat([x_comm, x_rest], dim=1)
 
@@ -149,11 +152,10 @@ class CommConv2dLayer(torch.nn.Module):
             d = kernel_size if not normalized else np.sqrt(kernel_size)
             weight = (torch.ones((1,1,kernel_size,1))/d).to(memory_format=memory_format)
         elif comm_type == 'sharpen':
-            weight =-(torch.ones((1,1,kernel_size,1))/kernel_size).to(memory_format=memory_format)
-            weight[:,:,kernel_size//2] += 1
-            
-        if normalized:
-            weight = weight / torch.square(weight).sum(dim=[2,3,4], keepdim=True).sqrt()
+            d = kernel_size if not normalized else np.sqrt(2) * (kernel_size-1)
+            weight =-(torch.ones((1,1,kernel_size,1))).to(memory_format=memory_format)
+            weight[:,:,kernel_size//2] += kernel_size
+            weight /= d
             
         self.register_buffer('weight', weight)
 
