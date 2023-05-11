@@ -48,8 +48,8 @@ class StyleGAN2Loss(Loss):
             self.D_loss_func_real   = lambda real: torch.nn.functional.softplus(-real) # torch.nn.functional.softplus(-real_logits)
             self.G_loss_func        = lambda gen: torch.nn.functional.softplus(-gen) # torch.nn.functional.softplus(-gen_logits)
         elif loss_type == 'hinge':
-            self.D_loss_func_gen    = lambda gen: torch.nn.functional.relu(1 - gen) # torch.nn.functional.relu(1 - gen_logits)
-            self.D_loss_func_real   = lambda real: torch.nn.functional.relu(1 + real) # torch.nn.functional.relu(1 + real_logits)
+            self.D_loss_func_gen    = lambda gen: torch.nn.functional.relu(torch.ones_like(gen) + gen) # torch.nn.functional.relu(1 + gen_logits)
+            self.D_loss_func_real   = lambda real: torch.nn.functional.relu(torch.ones_like(real) - real) # torch.nn.functional.relu(1 - real_logits)
             self.G_loss_func        = lambda gen: -gen # -gen_logits
         else:
             self.D_loss_func_gen    = lambda gen:  gen  # gen_logits
