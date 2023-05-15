@@ -106,11 +106,13 @@ class CommLayer(torch.nn.Module):
             self.conv = torch.nn.MaxPool2d((win_size,1), stride=1)
             if normalized:
                 # magic number
-                self.register_buffer('gain', 1/0.7479)
-                self.register_buffer('bias', torch.full([n_comm_channels],fill_value=-0.8466))
+                gain = torch.tensor([1/0.7479])
+                bias = torch.tensor([-0.8466]).expand(n_comm_channels)
+                self.register_buffer('gain', gain)
+                self.register_buffer('bias', bias)
             else:
                 self.gain = self.bias = None
-        elif comm_type in ['mean', 'sharpen']:
+        elif comm_type in ['mean', 'sharpen', 'hill']:
             self.conv = CommConv2dLayer(comm_type, kernel_size=win_size, normalized=normalized,channels_last=channels_last)
             self.gain = self.bias = None
         else:
@@ -125,9 +127,11 @@ class CommLayer(torch.nn.Module):
         x_comm = torch.cat([x_comm[:,-self.pad_size:,:], x_comm, x_comm[:,:self.pad_size,:]], dim=1)
         x_comm = self.conv(x_comm.unsqueeze(1)).permute(2,1,0,3).view(b,c,h,w) # c,b,h*w -> c,1,b,h*w -> b,1,c,h*w -> b,c,h,w
         if self.gain is not None:
-            x_comm = x_comm * self.gain
+            gain = self.gain.to(x_comm.dtype)
+            x_comm = x_comm * gain
         if self.bias is not None:
-            x_comm = bias_act.bias_act(x_comm, self.bias)
+            bias = self.bias.to(x_comm.dtype)
+            x_comm = bias_act.bias_act(x_comm, bias)
         
         return torch.cat([x_comm, x_rest], dim=1)
 
@@ -142,7 +146,7 @@ class CommConv2dLayer(torch.nn.Module):
         channels_last   = False,        # Expect the input to have memory_format=channels_last?
     ):
         super().__init__()
-        assert comm_type in ['mean', 'sharpen']
+        assert comm_type in ['mean', 'sharpen', 'hill']
         assert kernel_size % 2 == 1 and kernel_size>=1 , "winsize must be odd"
         self.in_channels = 1
         self.out_channels = 1
@@ -156,7 +160,12 @@ class CommConv2dLayer(torch.nn.Module):
             weight =-(torch.ones((1,1,kernel_size,1))).to(memory_format=memory_format)
             weight[:,:,kernel_size//2] += kernel_size
             weight /= d
-            
+        elif comm_type == 'hill':
+            d = kernel_size if not normalized else np.sqrt( (kernel_size-1) + 2**2 )
+            weight = (torch.ones((1,1,kernel_size,1))).to(memory_format=memory_format)
+            weight[:,:,kernel_size//2] += 1
+            weight /= d
+                   
         self.register_buffer('weight', weight)
 
     def forward(self, x):
@@ -649,7 +658,6 @@ class DiscriminatorBlock(torch.nn.Module):
         fp16_channels_last  = False,        # Use channels-last memory format with FP16?
         freeze_layers       = 0,            # Freeze-D: Number of layers to freeze.
     ):
-        assert comm_type in ['mean', 'sharpen', 'maxpool']
         assert in_channels in [0, tmp_channels]
         assert architecture in ['orig', 'skip', 'resnet']
         super().__init__()
@@ -823,8 +831,8 @@ class Discriminator(torch.nn.Module):
         c_dim,                          # Conditioning label (C) dimensionality.
         img_resolution,                 # Input resolution.
         img_channels,                   # Number of input color channels.
-        # comm_begin_res      = -1,       # where to start communications. a value <=0 indicates no communication.
-        comm_mult           = 1/16,     # decides how many percentage of communication channels. must be greater than 1/16
+        num_comm_res        = 1,        # Communication for N highest resolutions. -1 = for every resolution.
+        comm_mult           = 1/16,     # decides the percentage of communication channels.
         comm_type           = 'mean',   # the type of communication
         num_packs           = 1,        # number of packs. PacGAN.
         architecture        = 'resnet', # Architecture: 'orig', 'skip', 'resnet'.
@@ -847,6 +855,8 @@ class Discriminator(torch.nn.Module):
         # self.comm_begin_res    = comm_begin_res
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
+        num_comm_res = num_comm_res if num_comm_res >= 0 else len(self.block_resolutions)
+        comm_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_comm_res), 8)
 
         if cmap_dim is None:
             cmap_dim = channels_dict[4]
@@ -867,7 +877,7 @@ class Discriminator(torch.nn.Module):
             tmp_channels = channels_dict[res]
             out_channels = channels_dict[res // 2]
             # comm_channels= 0 if res > self.comm_begin_res and self.comm_begin_res > 0 else out_channels//4
-            comm_channels = int(tmp_channels*comm_mult)
+            comm_channels = int(tmp_channels*comm_mult) if (res >= comm_resolution) else 0
             use_fp16 = (res >= fp16_resolution)
             block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, comm_channels, comm_type=comm_type, resolution=res,
                 first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)

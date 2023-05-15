@@ -139,7 +139,7 @@ def parse_comma_separated_list(s):
 @click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
 @click.option('--freezed',      help='Freeze first layers of D', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--comm',         help='enable communication', metavar='BOOL',                    type=bool, default=False, show_default=True)
-@click.option('--comm_type',    help='Type of communication', metavar='STR',                    type=click.Choice(['mean', 'sharpen', 'maxpool']), default='mean',  show_default=True)
+@click.option('--comm_type',    help='Type of communication', metavar='STR',                    type=click.Choice(['mean', 'sharpen', 'maxpool', 'hill']), default='mean',  show_default=True)
 
 # Misc hyperparameters.
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
@@ -215,6 +215,7 @@ def main(**kwargs):
     c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
     c.D_kwargs.comm_mult = 1/16 if opts.comm else 0                 #TODO: communication
+    c.D_kwargs.num_comm_res = 1 if opts.comm else 0
     c.D_kwargs.comm_type = opts.comm_type                          
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
     c.D_kwargs.epilogue_kwargs.mbstd_num_channels = 1 if opts.mbstd else 0
