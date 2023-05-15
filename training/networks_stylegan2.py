@@ -152,7 +152,7 @@ class CommConv2dLayer(torch.nn.Module):
             d = kernel_size if not normalized else np.sqrt(kernel_size)
             weight = (torch.ones((1,1,kernel_size,1))/d).to(memory_format=memory_format)
         elif comm_type == 'sharpen':
-            d = kernel_size if not normalized else np.sqrt(2) * (kernel_size-1)
+            d = kernel_size if not normalized else np.sqrt( (kernel_size-1)**2 + (kernel_size-1) )
             weight =-(torch.ones((1,1,kernel_size,1))).to(memory_format=memory_format)
             weight[:,:,kernel_size//2] += kernel_size
             weight /= d

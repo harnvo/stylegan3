@@ -26,7 +26,9 @@ class StyleGAN2Loss(Loss):
     def __init__(self, device, G, D,
         loss_type = 'bce',
         augment_pipe=None, r1_gamma=10, style_mixing_prob=0, pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, pl_no_weight_grad=False,
-        blur_init_sigma=0, blur_fade_kimg=0):
+        blur_init_sigma=0, blur_fade_kimg=0,
+        wgan_epsilon = 0.001
+        ):
         assert loss_type in ['bce', 'hinge', 'wgan']
         super().__init__()
         self.device             = device
@@ -42,6 +44,7 @@ class StyleGAN2Loss(Loss):
         self.pl_mean            = torch.zeros([], device=device)
         self.blur_init_sigma    = blur_init_sigma
         self.blur_fade_kimg     = blur_fade_kimg
+        self.wgan_epsilon       = wgan_epsilon      # For optional wgan-D-loss regularization only
         
         if loss_type == 'bce':
             self.D_loss_func_gen    = torch.nn.functional.softplus # torch.nn.functional.softplus(gen_logits)
@@ -53,7 +56,7 @@ class StyleGAN2Loss(Loss):
             self.G_loss_func        = lambda gen: -gen # -gen_logits
         else:
             self.D_loss_func_gen    = lambda gen:  gen  # gen_logits
-            self.D_loss_func_real   = lambda real:-real #-real_logits
+            self.D_loss_func_real   = lambda real:-real + self.wgan_epsilon * torch.square(real) #-real_logits
             self.G_loss_func        = lambda gen: -gen  #-gen_logits
 
     def run_G(self, z, c, update_emas=False):
