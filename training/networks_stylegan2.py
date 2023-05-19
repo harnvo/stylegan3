@@ -93,11 +93,12 @@ def modulated_conv2d(
 @persistence.persistent_class
 class CommLayer(torch.nn.Module):
     # here we only implements mean communication. Reason is explained in paper.
-    def __init__(self, n_comm_channels, win_size=3, comm_type='mean', channels_last=False, normalized=True) -> None:
+    def __init__(self, n_comm_channels, win_size=3, comm_type='mean', group_size=4, channels_last=False, normalized=True) -> None:
         assert win_size % 2 == 1 and win_size>=1 , "winsize must be odd"
         super().__init__()
         self.pad_size   = win_size//2
         self.n_channels = n_comm_channels
+        self.group_size = group_size
         
         if comm_type == 'maxpool':
             if win_size != 3:
@@ -121,11 +122,13 @@ class CommLayer(torch.nn.Module):
     def forward(self, x):
         x_comm, x_rest = x.split([self.n_channels, x.shape[1]-self.n_channels], dim=1)
         b,c,h,w = x_comm.shape
-        # b,c,h,w -> c,b,h*w
-        x_comm = x_comm.reshape(b,c,h*w).permute(1,0,2)
+        G = min(self.group_size, b)
+        N = b//G
+        # b,c,h,w -> N,G,c,h,w -> N,c,G,h,w
+        x_comm = x_comm.reshape(N,G,c,h,w).permute(0,2,1,3,4).reshape(N*c,G,h*w)
         # circular padding
         x_comm = torch.cat([x_comm[:,-self.pad_size:,:], x_comm, x_comm[:,:self.pad_size,:]], dim=1)
-        x_comm = self.conv(x_comm.unsqueeze(1)).permute(2,1,0,3).view(b,c,h,w) # c,b,h*w -> c,1,b,h*w -> b,1,c,h*w -> b,c,h,w
+        x_comm = self.conv(x_comm.unsqueeze(1)).reshape(N,c,G,h,w).permute(0,2,1,3,4).reshape(b,c,h,w) # N*c,1,(G+2*pad_size),h*w -> N,c,G,h,w -> N,G,c,h,w -> b,c,h,w
         if self.gain is not None:
             gain = self.gain.to(x_comm.dtype)
             x_comm = x_comm * gain
