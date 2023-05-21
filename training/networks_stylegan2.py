@@ -93,7 +93,7 @@ def modulated_conv2d(
 @persistence.persistent_class
 class CommLayer(torch.nn.Module):
     # here we only implements mean communication. Reason is explained in paper.
-    def __init__(self, n_comm_channels, win_size=3, comm_type='mean', group_size=4, channels_last=False, normalized=True) -> None:
+    def __init__(self, n_comm_channels, win_size=3, comm_type='mean', group_size=None, channels_last=False, normalized=True) -> None:
         assert win_size % 2 == 1 and win_size>=1 , "winsize must be odd"
         super().__init__()
         self.pad_size   = win_size//2
@@ -122,7 +122,7 @@ class CommLayer(torch.nn.Module):
     def forward(self, x):
         x_comm, x_rest = x.split([self.n_channels, x.shape[1]-self.n_channels], dim=1)
         b,c,h,w = x_comm.shape
-        G = min(self.group_size, b)
+        G = min(self.group_size, b) if self.group_size is not None else b
         N = b//G
         # b,c,h,w -> N,G,c,h,w -> N,c,G,h,w
         x_comm = x_comm.reshape(N,G,c,h,w).permute(0,2,1,3,4).reshape(N*c,G,h*w)
@@ -721,14 +721,15 @@ class DiscriminatorBlock(torch.nn.Module):
         if self.architecture == 'resnet':
             y = self.skip(x, gain=np.sqrt(0.5))
             x = self.conv0(x)
-            x = self.comm(x)
+            # x = self.comm(x)
             x = self.conv1(x, gain=np.sqrt(0.5))
             x = y.add_(x)
         else:
             x = self.conv0(x)
-            x = self.comm(x)
+            # x = self.comm(x)
             x = self.conv1(x)
             
+        x = self.comm(x)
 
         assert x.dtype == dtype
         return x, img
@@ -859,7 +860,7 @@ class Discriminator(torch.nn.Module):
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
         num_comm_res = num_comm_res if num_comm_res >= 0 else len(self.block_resolutions)
-        comm_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_comm_res), 8)
+        comm_resolution = max(2 ** (num_comm_res+1), 8)
 
         if cmap_dim is None:
             cmap_dim = channels_dict[4]
@@ -880,7 +881,7 @@ class Discriminator(torch.nn.Module):
             tmp_channels = channels_dict[res]
             out_channels = channels_dict[res // 2]
             # comm_channels= 0 if res > self.comm_begin_res and self.comm_begin_res > 0 else out_channels//4
-            comm_channels = int(tmp_channels*comm_mult) if (res >= comm_resolution) else 0
+            comm_channels = int(out_channels*comm_mult) if (res <= comm_resolution) else 0
             use_fp16 = (res >= fp16_resolution)
             block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, comm_channels, comm_type=comm_type, resolution=res,
                 first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)
