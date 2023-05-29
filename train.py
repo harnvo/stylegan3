@@ -215,7 +215,7 @@ def main(**kwargs):
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
     c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
-    c.D_kwargs.comm_mult = 1/16 if opts.comm else 0                 #TODO: communication
+    c.D_kwargs.comm_mult = 1/64 if opts.comm else 0                 #TODO: communication
     c.D_kwargs.num_comm_res = opts.n_comm_res if opts.comm else 0
     c.D_kwargs.comm_type = opts.comm_type                          
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group

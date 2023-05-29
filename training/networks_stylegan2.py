@@ -92,7 +92,6 @@ def modulated_conv2d(
 
 @persistence.persistent_class
 class CommLayer(torch.nn.Module):
-    # here we only implements mean communication. Reason is explained in paper.
     def __init__(self, n_comm_channels, win_size=3, comm_type='mean', group_size=None, channels_last=False, normalized=True) -> None:
         assert win_size % 2 == 1 and win_size>=1 , "winsize must be odd"
         super().__init__()
@@ -100,27 +99,13 @@ class CommLayer(torch.nn.Module):
         self.n_channels = n_comm_channels
         self.group_size = group_size
         
-        if comm_type == 'maxpool':
-            if win_size != 3:
-                import warnings
-                warnings.warn("maxpool communication with win_size != 3 requires re-computation of gain and bias.")
-            self.conv = torch.nn.MaxPool2d((win_size,1), stride=1)
-            if normalized:
-                # magic number
-                gain = torch.tensor([1/0.7479])
-                bias = torch.tensor([-0.8466]).expand(n_comm_channels)
-                self.register_buffer('gain', gain)
-                self.register_buffer('bias', bias)
-            else:
-                self.gain = self.bias = None
-        elif comm_type in ['mean', 'sharpen', 'hill']:
+        if comm_type in ['mean', 'sharpen']:
             self.conv = CommConv2dLayer(comm_type, kernel_size=win_size, normalized=normalized,channels_last=channels_last)
-            self.gain = self.bias = None
         else:
             raise NotImplementedError
         
     def forward(self, x):
-        x_comm, x_rest = x.split([self.n_channels, x.shape[1]-self.n_channels], dim=1)
+        x_comm, _ = x.split([self.n_channels, x.shape[1]-self.n_channels], dim=1)
         b,c,h,w = x_comm.shape
         G = min(self.group_size, b) if self.group_size is not None else b
         N = b//G
@@ -129,14 +114,8 @@ class CommLayer(torch.nn.Module):
         # circular padding
         x_comm = torch.cat([x_comm[:,-self.pad_size:,:], x_comm, x_comm[:,:self.pad_size,:]], dim=1)
         x_comm = self.conv(x_comm.unsqueeze(1)).reshape(N,c,G,h,w).permute(0,2,1,3,4).reshape(b,c,h,w) # N*c,1,(G+2*pad_size),h*w -> N,c,G,h,w -> N,G,c,h,w -> b,c,h,w
-        if self.gain is not None:
-            gain = self.gain.to(x_comm.dtype)
-            x_comm = x_comm * gain
-        if self.bias is not None:
-            bias = self.bias.to(x_comm.dtype)
-            x_comm = bias_act.bias_act(x_comm, bias)
         
-        return torch.cat([x_comm, x_rest], dim=1)
+        return torch.cat([x_comm, x], dim=1)
 
 @persistence.persistent_class
 class CommConv2dLayer(torch.nn.Module):
@@ -149,7 +128,7 @@ class CommConv2dLayer(torch.nn.Module):
         channels_last   = False,        # Expect the input to have memory_format=channels_last?
     ):
         super().__init__()
-        assert comm_type in ['mean', 'sharpen', 'hill']
+        assert comm_type in ['mean', 'sharpen']
         assert kernel_size % 2 == 1 and kernel_size>=1 , "winsize must be odd"
         self.in_channels = 1
         self.out_channels = 1
@@ -163,11 +142,8 @@ class CommConv2dLayer(torch.nn.Module):
             weight =-(torch.ones((1,1,kernel_size,1))).to(memory_format=memory_format)
             weight[:,:,kernel_size//2] += kernel_size
             weight /= d
-        elif comm_type == 'hill':
-            d = kernel_size if not normalized else np.sqrt( (kernel_size-1) + 2**2 )
-            weight = (torch.ones((1,1,kernel_size,1))).to(memory_format=memory_format)
-            weight[:,:,kernel_size//2] += 1
-            weight /= d
+        else:
+            raise NotImplementedError
                    
         self.register_buffer('weight', weight)
 
@@ -648,7 +624,8 @@ class DiscriminatorBlock(torch.nn.Module):
         in_channels,                        # Number of input channels, 0 = first block.
         tmp_channels,                       # Number of intermediate channels.
         out_channels,                       # Number of output channels.
-        comm_channels,                      # Number of communication channels.
+        # comm_channels,                      # Number of communication channels.
+        comm_mult,                          # propotion of communication channels
         comm_type,                          # type of communication.
         resolution,                         # Resolution of this block.
         img_channels,                       # Number of input color channels.
@@ -685,14 +662,19 @@ class DiscriminatorBlock(torch.nn.Module):
         if in_channels == 0 or architecture == 'skip':
             self.fromrgb = Conv2dLayer(img_channels, tmp_channels, kernel_size=1, activation=activation,
                 trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
+            
+        comm_channels = int(tmp_channels*comm_mult)
+        self.comm = CommLayer(n_comm_channels=comm_channels, comm_type=comm_type, channels_last=self.channels_last) if comm_mult != 0 else torch.nn.Identity()
 
-        self.conv0 = Conv2dLayer(tmp_channels, tmp_channels, kernel_size=3, activation=activation,
+        self.conv0 = Conv2dLayer(tmp_channels+comm_channels, tmp_channels, kernel_size=3, activation=activation,
             trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
+        
+        # self.comm1 = CommLayer(n_comm_channels=int(tmp_channels*comm_mult), comm_type=comm_type, channels_last=self.channels_last) if comm_mult != 0 else torch.nn.Identity()
 
         self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation=activation, down=2,
             trainable=next(trainable_iter), resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last)
         
-        self.comm = CommLayer(n_comm_channels=comm_channels, comm_type=comm_type, channels_last=self.channels_last) if comm_channels >= 1 else torch.nn.Identity()
+        
 
         if architecture == 'resnet':
             self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2,
@@ -719,17 +701,18 @@ class DiscriminatorBlock(torch.nn.Module):
 
         # Main layers.
         if self.architecture == 'resnet':
-            y = self.skip(x, gain=np.sqrt(0.5))
-            x = self.conv0(x)
             # x = self.comm(x)
+            y = self.skip(x, gain=np.sqrt(0.5))
+            x = self.comm(x)
+            x = self.conv0(x)
             x = self.conv1(x, gain=np.sqrt(0.5))
             x = y.add_(x)
         else:
+            x = self.comm(x)
             x = self.conv0(x)
-            # x = self.comm(x)
             x = self.conv1(x)
             
-        x = self.comm(x)
+        # x = self.comm2(x)
 
         assert x.dtype == dtype
         return x, img
@@ -881,9 +864,10 @@ class Discriminator(torch.nn.Module):
             tmp_channels = channels_dict[res]
             out_channels = channels_dict[res // 2]
             # comm_channels= 0 if res > self.comm_begin_res and self.comm_begin_res > 0 else out_channels//4
-            comm_channels = int(out_channels*comm_mult) if (res <= comm_resolution) else 0
+            # comm_channels = int(out_channels*comm_mult) if (res <= comm_resolution) else 0
+            _comm_mult = comm_mult if (res <= comm_resolution) else 0
             use_fp16 = (res >= fp16_resolution)
-            block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, comm_channels, comm_type=comm_type, resolution=res,
+            block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, comm_mult=_comm_mult, comm_type=comm_type, resolution=res,
                 first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)
             setattr(self, f'b{res}', block)
             cur_layer_idx += block.num_layers
