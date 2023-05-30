@@ -669,15 +669,11 @@ class DiscriminatorBlock(torch.nn.Module):
         self.conv0 = Conv2dLayer(tmp_channels+comm_channels, tmp_channels, kernel_size=3, activation=activation,
             trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
         
-        # self.comm1 = CommLayer(n_comm_channels=int(tmp_channels*comm_mult), comm_type=comm_type, channels_last=self.channels_last) if comm_mult != 0 else torch.nn.Identity()
-
         self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation=activation, down=2,
             trainable=next(trainable_iter), resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last)
         
-        
-
         if architecture == 'resnet':
-            self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2,
+            self.skip = Conv2dLayer(tmp_channels+comm_channels, out_channels, kernel_size=1, bias=False, down=2,
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
 
     def forward(self, x, img, force_fp32=False):
@@ -701,9 +697,9 @@ class DiscriminatorBlock(torch.nn.Module):
 
         # Main layers.
         if self.architecture == 'resnet':
-            # x = self.comm(x)
-            y = self.skip(x, gain=np.sqrt(0.5))
             x = self.comm(x)
+            y = self.skip(x, gain=np.sqrt(0.5))
+            # x = self.comm(x)
             x = self.conv0(x)
             x = self.conv1(x, gain=np.sqrt(0.5))
             x = y.add_(x)
@@ -711,8 +707,6 @@ class DiscriminatorBlock(torch.nn.Module):
             x = self.comm(x)
             x = self.conv0(x)
             x = self.conv1(x)
-            
-        # x = self.comm2(x)
 
         assert x.dtype == dtype
         return x, img
@@ -839,11 +833,12 @@ class Discriminator(torch.nn.Module):
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
         self.block_resolutions = [2 ** i for i in range(self.img_resolution_log2, 2, -1)]
+        
         # self.comm_begin_res    = comm_begin_res
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
         num_comm_res = num_comm_res if num_comm_res >= 0 else len(self.block_resolutions)
-        comm_resolution = max(2 ** (num_comm_res+1), 8)
+        comm_resolution = max(2 ** (num_comm_res+2), 8)
 
         if cmap_dim is None:
             cmap_dim = channels_dict[4]
