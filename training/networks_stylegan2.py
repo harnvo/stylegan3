@@ -98,11 +98,16 @@ class CommLayer(torch.nn.Module):
         self.pad_size   = win_size//2
         self.n_channels = n_comm_channels
         self.group_size = group_size
+        self.gain = np.sqrt(n_comm_channels)
         
         if comm_type in ['mean', 'sharpen']:
             self.conv = CommConv2dLayer(comm_type, kernel_size=win_size, normalized=normalized,channels_last=channels_last)
         else:
             raise NotImplementedError
+        
+    @property
+    def new_channels(self):
+        return 1
         
     def forward(self, x):
         x_comm, _ = x.split([self.n_channels, x.shape[1]-self.n_channels], dim=1)
@@ -115,6 +120,8 @@ class CommLayer(torch.nn.Module):
         x_comm = torch.cat([x_comm[:,-self.pad_size:,:], x_comm, x_comm[:,:self.pad_size,:]], dim=1)
         x_comm = self.conv(x_comm.unsqueeze(1)).reshape(N,c,G,h,w).permute(0,2,1,3,4).reshape(b,c,h,w) # N*c,1,(G+2*pad_size),h*w -> N,c,G,h,w -> N,G,c,h,w -> b,c,h,w
         
+        x_comm = torch.mean(x_comm, dim=1, keepdim=False).reshape(b,1,h,w) * self.gain # b,c,h,w -> b,h,w
+        
         return torch.cat([x_comm, x], dim=1)
 
 @persistence.persistent_class
@@ -124,7 +131,7 @@ class CommConv2dLayer(torch.nn.Module):
         # out_channels,                   # Number of output channels.
         comm_type,                      # Type of communication layer.
         kernel_size,                    # Width and height of the convolution kernel.
-        normalized      = True,         # Normalize the kernel?
+        normalized      = False,         # Normalize the kernel?
         channels_last   = False,        # Expect the input to have memory_format=channels_last?
     ):
         super().__init__()
@@ -665,15 +672,16 @@ class DiscriminatorBlock(torch.nn.Module):
             
         comm_channels = int(tmp_channels*comm_mult)
         self.comm = CommLayer(n_comm_channels=comm_channels, comm_type=comm_type, channels_last=self.channels_last) if comm_mult != 0 else torch.nn.Identity()
+        extra_channels = self.comm.new_channels if comm_mult != 0 else 0
 
-        self.conv0 = Conv2dLayer(tmp_channels+comm_channels, tmp_channels, kernel_size=3, activation=activation,
+        self.conv0 = Conv2dLayer(tmp_channels+extra_channels, tmp_channels, kernel_size=3, activation=activation,
             trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
         
         self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation=activation, down=2,
             trainable=next(trainable_iter), resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last)
         
         if architecture == 'resnet':
-            self.skip = Conv2dLayer(tmp_channels+comm_channels, out_channels, kernel_size=1, bias=False, down=2,
+            self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2,
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
 
     def forward(self, x, img, force_fp32=False):
@@ -697,9 +705,9 @@ class DiscriminatorBlock(torch.nn.Module):
 
         # Main layers.
         if self.architecture == 'resnet':
-            x = self.comm(x)
-            y = self.skip(x, gain=np.sqrt(0.5))
             # x = self.comm(x)
+            y = self.skip(x, gain=np.sqrt(0.5))
+            x = self.comm(x)
             x = self.conv0(x)
             x = self.conv1(x, gain=np.sqrt(0.5))
             x = y.add_(x)
