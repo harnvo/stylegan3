@@ -125,7 +125,7 @@ def parse_comma_separated_list(s):
 
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
+@click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2', 'proj-gan']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
 @click.option('--batch',        help='Total batch size', metavar='INT',                         type=click.IntRange(min=1), required=True)
@@ -138,9 +138,6 @@ def parse_comma_separated_list(s):
 @click.option('--aug',          help='Augmentation mode',                                       type=click.Choice(['noaug', 'ada', 'fixed']), default='ada', show_default=True)
 @click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
 @click.option('--freezed',      help='Freeze first layers of D', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
-@click.option('--comm',         help='enable communication', metavar='BOOL',                    type=bool, default=False, show_default=True)
-@click.option('--comm_type',    help='Type of communication', metavar='STR',                    type=click.Choice(['mean', 'sharpen', 'maxpool', 'hill']), default='mean',  show_default=True)
-@click.option('--n_comm_res',   help='Number of resolution for communication', metavar='INT',    type=click.IntRange(min=-1), default=1, show_default=True)
 
 # Misc hyperparameters.
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
@@ -153,6 +150,9 @@ def parse_comma_separated_list(s):
 @click.option('--map-depth',    help='Mapping network depth  [default: varies]', metavar='INT', type=click.IntRange(min=1))
 @click.option('--mbstd',         help='minibatch std', metavar='BOOL',                          type=bool, default=True, show_default=True)
 @click.option('--mbstd-group',  help='Minibatch std group size', metavar='INT',                 type=click.IntRange(min=1), default=4, show_default=True)
+@click.option('--comm',         help='enable communication', metavar='BOOL',                    type=bool, default=False, show_default=True)
+@click.option('--comm_type',    help='Type of communication', metavar='STR',                    type=click.Choice(['mean', 'sharpen', 'maxpool', 'hill']), default='mean',  show_default=True)
+@click.option('--n_comm_res',   help='Number of resolution for communication', metavar='INT',    type=click.IntRange(min=-1), default=-1, show_default=True)
 
 # Misc settings.
 @click.option('--desc',         help='String to include in result dir name', metavar='STR',     type=str)
@@ -194,10 +194,10 @@ def main(**kwargs):
     
     c = dnnlib.EasyDict() # Main config dict.
     c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
-    c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+    # c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
-    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
+    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.ProjectedGANLoss' if opts.cfg == 'proj-gan' else 'training.loss.StyleGAN2Loss')
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
     # Training set.
@@ -206,6 +206,35 @@ def main(**kwargs):
         raise click.ClickException('--cond=True requires labels specified in dataset.json')
     c.training_set_kwargs.use_labels = opts.cond
     c.training_set_kwargs.xflip = opts.mirror
+    
+    # discriminator
+    if opts.cfg == 'proj-gan':
+        c.D_kwargs = dnnlib.EasyDict(
+            class_name='pg_modules.discriminator.ProjectedDiscriminator',
+            diffaug=True,
+            interp224=(c.training_set_kwargs.resolution < 224),
+            backbone_kwargs=dnnlib.EasyDict(),
+            
+            # for compatibility
+            block_kwargs=dnnlib.EasyDict(), 
+            mapping_kwargs=dnnlib.EasyDict(), 
+            epilogue_kwargs=dnnlib.EasyDict()
+        )
+        use_separable_discs = True
+
+        c.D_kwargs.backbone_kwargs.cout = 64
+        c.D_kwargs.backbone_kwargs.expand = True
+        c.D_kwargs.backbone_kwargs.proj_type = 2
+        c.D_kwargs.backbone_kwargs.num_discs = 4
+        c.D_kwargs.backbone_kwargs.separable = use_separable_discs
+        c.D_kwargs.backbone_kwargs.cond = opts.cond
+    else:
+        c.D_kwargs = dnnlib.EasyDict(
+            class_name='training.networks_stylegan2.Discriminator', 
+            block_kwargs=dnnlib.EasyDict(), 
+            mapping_kwargs=dnnlib.EasyDict(), 
+            epilogue_kwargs=dnnlib.EasyDict()
+        )
 
     # Hyperparameters & settings.
     c.num_gpus = opts.gpus
@@ -215,7 +244,7 @@ def main(**kwargs):
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
     c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
-    c.D_kwargs.comm_mult = 1/16 if opts.comm else 0                 #TODO: communication
+    c.D_kwargs.comm_mult = 1/16 if opts.comm else 0 
     c.D_kwargs.num_comm_res = opts.n_comm_res if opts.comm else 0
     c.D_kwargs.comm_type = opts.comm_type                          
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
@@ -250,7 +279,7 @@ def main(**kwargs):
         c.G_reg_interval = 4 # Enable lazy regularization for G.
         c.G_kwargs.fused_modconv_default = 'inference_only' # Speed up training by using regular convolutions instead of grouped convolutions.
         c.loss_kwargs.pl_no_weight_grad = True # Speed up path length regularization by skipping gradient computation wrt. conv2d weights.
-    else:
+    elif opts.cfg in ['stylegan3-t', 'stylegan3-r']:
         c.G_kwargs.class_name = 'training.networks_stylegan3.Generator'
         c.G_kwargs.magnitude_ema_beta = 0.5 ** (c.batch_size / (20 * 1e3))
         if opts.cfg == 'stylegan3-r':
@@ -260,6 +289,14 @@ def main(**kwargs):
             c.G_kwargs.use_radial_filters = True # Use radially symmetric downsampling filters.
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
+    elif opts.cfg == 'proj-gan':
+        c.G_kwargs = dnnlib.EasyDict(class_name='pg_modules.networks_fastgan.Generator', cond=opts.cond, synthesis_kwargs=dnnlib.EasyDict())
+        c.G_kwargs.synthesis_kwargs.lite = (opts.cfg == 'fastgan_lite')
+        c.G_opt_kwargs.lr = (0.0002 if opts.glr is None else opts.glr)
+        c.D_opt_kwargs.lr = (0.0002 if opts.dlr is None else opts.dlr)
+        # use_separable_discs = False
+    else:
+        raise click.ClickException(f'--cfg={opts.cfg} not supported')
 
     # Augmentation.
     if opts.aug != 'noaug':

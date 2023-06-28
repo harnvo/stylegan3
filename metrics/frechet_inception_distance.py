@@ -39,26 +39,3 @@ def compute_fid(opts, max_real, num_gen):
     return float(fid)
 
 #----------------------------------------------------------------------------
-
-def compute_intra_fid(opts, num_gen):
-    # Direct TorchScript translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
-    detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
-    detector_kwargs = dict(return_features=True) # Return raw features before the softmax layer.
-
-    mu_gen1, sigma_gen1 = metric_utils.compute_feature_stats_for_generator(
-        opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
-        rel_lo=0, rel_hi=1, capture_mean_cov=True, max_items=num_gen).get_mean_cov()
-
-    mu_gen2, sigma_gen2 = metric_utils.compute_feature_stats_for_generator(
-        opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
-        rel_lo=0, rel_hi=1, capture_mean_cov=True, max_items=num_gen).get_mean_cov()
-
-    if opts.rank != 0:
-        return float('nan')
-
-    m = np.square(mu_gen1 - mu_gen2).sum()
-    s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen1, sigma_gen2), disp=False) # pylint: disable=no-member
-    fid = np.real(m + np.trace(sigma_gen1 + sigma_gen2 - s * 2))
-    return float(fid)
-
-#----------------------------------------------------------------------------

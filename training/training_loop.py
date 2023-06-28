@@ -360,7 +360,11 @@ def training_loop(
             snapshot_data = dict(G=G, D=D, G_ema=G_ema, augment_pipe=augment_pipe, training_set_kwargs=dict(training_set_kwargs))
             for key, value in snapshot_data.items():
                 if isinstance(value, torch.nn.Module):
-                    value = copy.deepcopy(value).eval().requires_grad_(False)
+                    try:
+                        value = copy.deepcopy(value).eval().requires_grad_(False)
+                    except:
+                        # proj-gan case
+                        pass
                     if num_gpus > 1:
                         misc.check_ddp_consistency(value, ignore_regex=r'.*\.[^.]+_(avg|ema)')
                         for param in misc.params_and_buffers(value):

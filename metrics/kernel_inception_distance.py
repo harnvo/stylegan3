@@ -44,33 +44,3 @@ def compute_kid(opts, max_real, num_gen, num_subsets, max_subset_size):
     return float(kid)
 
 #----------------------------------------------------------------------------
-
-def compute_intra_kid(opts, num_gen, num_subsets, max_subset_size):
-    # Direct TorchScript translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
-    detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
-    detector_kwargs = dict(return_features=True) # Return raw features before the softmax layer.
-
-    gen_features1 = metric_utils.compute_feature_stats_for_generator(
-        opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
-        rel_lo=0, rel_hi=1, capture_all=True, max_items=num_gen).get_all()
-
-    gen_features2 = metric_utils.compute_feature_stats_for_generator(
-        opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
-        rel_lo=0, rel_hi=1, capture_all=True, max_items=num_gen).get_all()
-
-    if opts.rank != 0:
-        return float('nan')
-
-    n = gen_features1.shape[1]
-    m = min(min(gen_features1.shape[0], gen_features2.shape[0]), max_subset_size)
-    t = 0
-    for _subset_idx in range(num_subsets):
-        x = gen_features1[np.random.choice(gen_features1.shape[0], m, replace=False)]
-        y = gen_features2[np.random.choice(gen_features2.shape[0], m, replace=False)]
-        a = (x @ x.T / n + 1) ** 3 + (y @ y.T / n + 1) ** 3
-        b = (x @ y.T / n + 1) ** 3
-        t += (a.sum() - np.diag(a).sum()) / (m - 1) - b.sum() * 2 / m
-    kid = t / num_subsets / m
-    return float(kid)
-
-#----------------------------------------------------------------------------

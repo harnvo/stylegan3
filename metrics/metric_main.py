@@ -151,16 +151,13 @@ def is50k(opts):
     return dict(is50k_mean=mean, is50k_std=std)
 
 #----------------------------------------------------------------------------
-# New metrics.
-
+import numpy as np
 @register_metric
-def intra_fid50k(opts):
-    opts.dataset_kwargs.update(max_size=None)
-    fid = frechet_inception_distance.compute_intra_fid(opts, num_gen=50000)
-    return dict(intra_fid50k=fid)
-
-@register_metric
-def intra_kid50k(opts):
-    opts.dataset_kwargs.update(max_size=None)
-    kid = kernel_inception_distance.compute_intra_kid(opts, num_gen=50000, num_subsets=100, max_subset_size=1000)
-    return dict(intra_kid50k=kid)
+def pr50k3_full_repeat10(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    percisions = []; recalls = []
+    for _ in range(10):
+        precision, recall = precision_recall.compute_pr(opts, max_real=200000, num_gen=50000, nhood_size=3, row_batch_size=10000, col_batch_size=10000)
+        percisions.append(precision); recalls.append(recall)
+    
+    return dict(pr50k3_full_precision=np.mean(percisions), pr50k3_full_recall=np.mean(recalls), pr50k3_full_precision_std=np.std(percisions), pr50k3_full_recall_std=np.std(recalls))
